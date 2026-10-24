@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triage"
+version = "0.1.0"
+description = "Prototype agent that triages failed data-pipeline jobs. Synthetic data only."
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=2.3,<3",
+    "pydantic>=2.14,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.1,<10"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

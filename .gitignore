@@ -1,0 +1,18 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Local output from the approval step
+out/
+
+# Eval run output. Remove this line if you want to commit results for the README.
+evals/results/
+
+# OS
+.DS_Store
