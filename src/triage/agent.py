@@ -8,12 +8,12 @@ from pathlib import Path
 import anthropic
 
 from triage import tools
+from triage.guardrails import MAX_STEPS, GuardrailError, check_tool_call, truncate
 from triage.models import fallback, parse_result
 
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 PROMPT_VERSION = "triage_v1"
 MODEL = os.environ.get("TRIAGE_MODEL", "claude-sonnet-5-5")
-MAX_STEPS = 8  # one step = one call to the model
 LOG_PREVIEW_CHARS = 300
 
 # Maps the tool name the model asks for to the Python function that runs it.
@@ -82,10 +82,16 @@ def run_triage(job_id: str, client=None) -> dict:
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            # A failing tool is reported back to the model, so it can correct itself.
+            # Guardrails check the request before anything runs. A blocked or failing
+            # tool is reported back to the model, so it can correct itself.
+            blocked = False
             try:
-                output = run_tool(block.name, block.input)
+                check_tool_call(block.name, block.input)
+                output = truncate(run_tool(block.name, block.input))
                 is_error = False
+            except GuardrailError as error:
+                output = f"Blocked by guardrail: {error}"
+                is_error = blocked = True
             except Exception as error:
                 output = f"Error: {error}"
                 is_error = True
@@ -96,6 +102,7 @@ def run_triage(job_id: str, client=None) -> dict:
                 "input": block.input,
                 "result": _preview(output),
                 "is_error": is_error,
+                "blocked": blocked,
             })
             results.append({"type": "tool_result", "tool_use_id": block.id, "content": output, "is_error": is_error})
         messages.append({"role": "user", "content": results})
@@ -108,7 +115,7 @@ def run_triage(job_id: str, client=None) -> dict:
 def print_run(run: dict) -> None:
     for entry in run["log"]:
         if entry["event"] == "tool_call":
-            flag = "  (ERROR)" if entry["is_error"] else ""
+            flag = "  (BLOCKED)" if entry["blocked"] else "  (ERROR)" if entry["is_error"] else ""
             print(f"Step {entry['step']}: {entry['tool']} {entry['input']}{flag}")
             print(f"    -> {entry['result'].replace(chr(10), ' | ')}")
         else:

@@ -68,10 +68,21 @@ def test_step_cap_returns_fallback_without_a_ninth_call():
     assert len(client.requests) == agent.MAX_STEPS
 
 
-def test_tool_error_is_sent_back_to_the_model():
-    client = FakeClient([tool_reply("get_job_log", {"job_id": "s99"}), text_reply(VALID_JSON)])
+def test_disallowed_tool_is_blocked_and_never_runs():
+    client = FakeClient([tool_reply("approve_and_file", {"job_id": "s03"}), text_reply(VALID_JSON)])
     run = agent.run_triage("s03", client=client)
+    assert run["log"][0]["blocked"] is True
+    tool_result = client.requests[1][-1]["content"][0]
+    assert tool_result["content"].startswith("Blocked by guardrail")
+
+
+def test_tool_error_is_sent_back_to_the_model():
+    # Passes the guardrails (all arguments present), but draft_ticket itself rejects priority "none".
+    ticket = {"job_id": "s17", "title": "t", "body": "b", "priority": "none"}
+    client = FakeClient([tool_reply("draft_ticket", ticket), text_reply(VALID_JSON)])
+    run = agent.run_triage("s17", client=client)
     assert run["log"][0]["is_error"] is True
+    assert run["log"][0]["blocked"] is False
     tool_result = client.requests[1][-1]["content"][0]
     assert tool_result["is_error"] is True
-    assert "Unknown job_id" in tool_result["content"]
+    assert "Invalid priority" in tool_result["content"]
