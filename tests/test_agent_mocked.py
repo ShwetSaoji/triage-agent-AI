@@ -68,6 +68,14 @@ def test_step_cap_returns_fallback_without_a_ninth_call():
     assert len(client.requests) == agent.MAX_STEPS
 
 
+def test_drafted_ticket_is_returned_for_approval():
+    ticket = {"job_id": "s03", "title": "Expired token", "body": "Rotate and rerun.", "priority": "high"}
+    client = FakeClient([tool_reply("draft_ticket", ticket), text_reply(VALID_JSON)])
+    run = agent.run_triage("s03", client=client)
+    assert len(run["drafts"]) == 1
+    assert run["drafts"][0]["status"] == "draft"
+
+
 def test_disallowed_tool_is_blocked_and_never_runs():
     client = FakeClient([tool_reply("approve_and_file", {"job_id": "s03"}), text_reply(VALID_JSON)])
     run = agent.run_triage("s03", client=client)

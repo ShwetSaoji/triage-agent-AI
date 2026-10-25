@@ -29,9 +29,13 @@ def load_system_prompt(version: str = PROMPT_VERSION) -> str:
     return (PROMPTS_DIR / f"{version}.md").read_text(encoding="utf-8")
 
 
-def run_tool(name: str, tool_input: dict) -> str:
-    """Run one tool and return its result as text, which is what the API expects back."""
-    result = TOOL_FUNCTIONS[name](**tool_input)
+def run_tool(name: str, tool_input: dict):
+    """Run one tool and return its raw result (text, a dict, or None)."""
+    return TOOL_FUNCTIONS[name](**tool_input)
+
+
+def to_text(result) -> str:
+    """Tool results go back to the model as text."""
     return result if isinstance(result, str) else json.dumps(result)
 
 
@@ -49,6 +53,7 @@ def run_triage(job_id: str, client=None) -> dict:
     system = load_system_prompt()
     messages = [{"role": "user", "content": f"Triage job {job_id}"}]
     log = []
+    drafts = []  # tickets the model drafted, for the human to approve in the CLI
     retried = False
 
     for step in range(1, MAX_STEPS + 1):
@@ -62,12 +67,14 @@ def run_triage(job_id: str, client=None) -> dict:
             try:
                 result = parse_result(final_text, PROMPT_VERSION)
                 log.append({"step": step, "event": "valid_answer"})
-                return {"result": result, "ended": "valid", "steps": step, "log": log}
+                return {"result": result, "ended": "valid", "steps": step, "log": log, "drafts": drafts}
             except ValueError as error:
                 log.append({"step": step, "event": "invalid_answer", "error": _preview(str(error))})
                 if retried:
                     result = fallback("the answer failed validation twice", PROMPT_VERSION)
-                    return {"result": result, "ended": "fallback_invalid_output", "steps": step, "log": log}
+                    return {
+                        "result": result, "ended": "fallback_invalid_output", "steps": step, "log": log, "drafts": drafts
+                    }
                 # First failure: show the model the exact error and give it one more turn.
                 retried = True
                 messages.append({"role": "assistant", "content": response.content})
@@ -87,7 +94,10 @@ def run_triage(job_id: str, client=None) -> dict:
             blocked = False
             try:
                 check_tool_call(block.name, block.input)
-                output = truncate(run_tool(block.name, block.input))
+                result = run_tool(block.name, block.input)
+                if block.name == "draft_ticket":
+                    drafts.append(result)
+                output = truncate(to_text(result))
                 is_error = False
             except GuardrailError as error:
                 output = f"Blocked by guardrail: {error}"
@@ -109,7 +119,7 @@ def run_triage(job_id: str, client=None) -> dict:
 
     log.append({"step": MAX_STEPS, "event": "step_cap_reached"})
     result = fallback(f"no valid answer within {MAX_STEPS} steps", PROMPT_VERSION)
-    return {"result": result, "ended": "fallback_step_cap", "steps": MAX_STEPS, "log": log}
+    return {"result": result, "ended": "fallback_step_cap", "steps": MAX_STEPS, "log": log, "drafts": drafts}
 
 
 def print_run(run: dict) -> None:
