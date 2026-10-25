@@ -29,17 +29,22 @@ class TriageResult(BaseModel):
     prompt_version: str  # filled in by our code, never by the model
 
 
+def extract_json(text: str) -> dict:
+    """Pull the JSON object out of a model's text. Raises ValueError if there is none."""
+    # Take everything from the first "{" to the last "}", which skips markdown fences or stray text.
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end < start:
+        raise ValueError("No JSON object found in the answer.")
+    return json.loads(text[start : end + 1])
+
+
 def parse_result(text: str, prompt_version: str) -> TriageResult:
     """Pull the JSON object out of the model's text and validate it.
 
     Raises ValueError if there is no valid JSON object or a field is wrong.
     (pydantic's ValidationError and json's JSONDecodeError are both kinds of ValueError.)
     """
-    # Take everything from the first "{" to the last "}", which skips markdown fences or stray text.
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end < start:
-        raise ValueError("No JSON object found in the answer.")
-    data = json.loads(text[start : end + 1])
+    data = extract_json(text)
     data["prompt_version"] = prompt_version  # overwrite anything the model wrote here
     return TriageResult.model_validate(data)
 
