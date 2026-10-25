@@ -8,6 +8,7 @@ from pathlib import Path
 import anthropic
 
 from triage import tools
+from triage.models import fallback, parse_result
 
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 PROMPT_VERSION = "triage_v1"
@@ -40,7 +41,7 @@ def _preview(text: str) -> str:
 
 
 def run_triage(job_id: str, client=None) -> dict:
-    """Investigate one job. Returns the model's final text, how the run ended, and a log of every step.
+    """Investigate one job. Always returns a valid TriageResult, how the run ended, and a log of every step.
 
     Pass a fake client in tests so no real API call is made.
     """
@@ -48,17 +49,33 @@ def run_triage(job_id: str, client=None) -> dict:
     system = load_system_prompt()
     messages = [{"role": "user", "content": f"Triage job {job_id}"}]
     log = []
+    retried = False
 
     for step in range(1, MAX_STEPS + 1):
         response = client.messages.create(
             model=MODEL, max_tokens=16000, system=system, tools=tools.TOOL_SCHEMAS, messages=messages
         )
 
-        # No tool requests means the model is done. Its text is the final answer.
+        # No tool requests means the model is giving its final answer. Check it.
         if response.stop_reason != "tool_use":
             final_text = "".join(block.text for block in response.content if block.type == "text")
-            log.append({"step": step, "event": "final_answer", "stop_reason": response.stop_reason})
-            return {"final_text": final_text, "ended": response.stop_reason, "steps": step, "log": log}
+            try:
+                result = parse_result(final_text, PROMPT_VERSION)
+                log.append({"step": step, "event": "valid_answer"})
+                return {"result": result, "ended": "valid", "steps": step, "log": log}
+            except ValueError as error:
+                log.append({"step": step, "event": "invalid_answer", "error": _preview(str(error))})
+                if retried:
+                    result = fallback("the answer failed validation twice", PROMPT_VERSION)
+                    return {"result": result, "ended": "fallback_invalid_output", "steps": step, "log": log}
+                # First failure: show the model the exact error and give it one more turn.
+                retried = True
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append({
+                    "role": "user",
+                    "content": f"Your answer failed validation:\n{error}\nReply with only the corrected JSON object.",
+                })
+                continue
 
         messages.append({"role": "assistant", "content": response.content})
         results = []
@@ -84,7 +101,8 @@ def run_triage(job_id: str, client=None) -> dict:
         messages.append({"role": "user", "content": results})
 
     log.append({"step": MAX_STEPS, "event": "step_cap_reached"})
-    return {"final_text": None, "ended": "step_cap", "steps": MAX_STEPS, "log": log}
+    result = fallback(f"no valid answer within {MAX_STEPS} steps", PROMPT_VERSION)
+    return {"result": result, "ended": "fallback_step_cap", "steps": MAX_STEPS, "log": log}
 
 
 def print_run(run: dict) -> None:
@@ -94,9 +112,9 @@ def print_run(run: dict) -> None:
             print(f"Step {entry['step']}: {entry['tool']} {entry['input']}{flag}")
             print(f"    -> {entry['result'].replace(chr(10), ' | ')}")
         else:
-            print(f"Step {entry['step']}: {entry['event']} {entry.get('stop_reason', '')}")
+            print(f"Step {entry['step']}: {entry['event']} {entry.get('error', '')}")
     print(f"\nEnded: {run['ended']} after {run['steps']} steps")
-    print(f"Final answer:\n{run['final_text']}")
+    print(f"Result:\n{run['result'].model_dump_json(indent=2)}")
 
 
 if __name__ == "__main__":
