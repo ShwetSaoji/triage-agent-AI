@@ -1,4 +1,4 @@
-"""Talks to the model. For now (build step 3): one tool call and one tool result, printed. No loop yet."""
+"""The agent loop: call the model, run the tools it asks for, repeat until it gives a final answer."""
 
 import json
 import os
@@ -12,6 +12,8 @@ from triage import tools
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 PROMPT_VERSION = "triage_v1"
 MODEL = os.environ.get("TRIAGE_MODEL", "claude-sonnet-5-5")
+MAX_STEPS = 8  # one step = one call to the model
+LOG_PREVIEW_CHARS = 300
 
 # Maps the tool name the model asks for to the Python function that runs it.
 TOOL_FUNCTIONS = {
@@ -32,48 +34,70 @@ def run_tool(name: str, tool_input: dict) -> str:
     return result if isinstance(result, str) else json.dumps(result)
 
 
-def print_blocks(response) -> None:
-    print(f"stop_reason: {response.stop_reason}")
-    for block in response.content:
-        if block.type == "text":
-            print(f"  [text] {block.text}")
-        elif block.type == "tool_use":
-            print(f"  [tool_use] id={block.id} name={block.name} input={block.input}")
-        else:
-            print(f"  [{block.type}] (not shown)")
+def _preview(text: str) -> str:
+    """Shorten long text for the log."""
+    return text if len(text) <= LOG_PREVIEW_CHARS else text[:LOG_PREVIEW_CHARS] + "..."
 
 
-def first_call_demo(job_id: str) -> None:
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+def run_triage(job_id: str, client=None) -> dict:
+    """Investigate one job. Returns the model's final text, how the run ended, and a log of every step.
+
+    Pass a fake client in tests so no real API call is made.
+    """
+    client = client or anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
     system = load_system_prompt()
     messages = [{"role": "user", "content": f"Triage job {job_id}"}]
+    log = []
 
-    print(f"=== Call 1: model={MODEL}, prompt={PROMPT_VERSION} ===")
-    response = client.messages.create(
-        model=MODEL, max_tokens=16000, system=system, tools=tools.TOOL_SCHEMAS, messages=messages
-    )
-    print_blocks(response)
+    for step in range(1, MAX_STEPS + 1):
+        response = client.messages.create(
+            model=MODEL, max_tokens=16000, system=system, tools=tools.TOOL_SCHEMAS, messages=messages
+        )
 
-    tool_uses = [block for block in response.content if block.type == "tool_use"]
-    if not tool_uses:
-        print("The model did not ask for a tool.")
-        return
+        # No tool requests means the model is done. Its text is the final answer.
+        if response.stop_reason != "tool_use":
+            final_text = "".join(block.text for block in response.content if block.type == "text")
+            log.append({"step": step, "event": "final_answer", "stop_reason": response.stop_reason})
+            return {"final_text": final_text, "ended": response.stop_reason, "steps": step, "log": log}
 
-    # Send back the model's full turn, then one tool_result per tool_use, matched by id.
-    messages.append({"role": "assistant", "content": response.content})
-    results = []
-    for tool_use in tool_uses:
-        output = run_tool(tool_use.name, tool_use.input)
-        print(f"\n=== Our code ran {tool_use.name} ===\n{output}")
-        results.append({"type": "tool_result", "tool_use_id": tool_use.id, "content": output})
-    messages.append({"role": "user", "content": results})
+        messages.append({"role": "assistant", "content": response.content})
+        results = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            # A failing tool is reported back to the model, so it can correct itself.
+            try:
+                output = run_tool(block.name, block.input)
+                is_error = False
+            except Exception as error:
+                output = f"Error: {error}"
+                is_error = True
+            log.append({
+                "step": step,
+                "event": "tool_call",
+                "tool": block.name,
+                "input": block.input,
+                "result": _preview(output),
+                "is_error": is_error,
+            })
+            results.append({"type": "tool_result", "tool_use_id": block.id, "content": output, "is_error": is_error})
+        messages.append({"role": "user", "content": results})
 
-    print("\n=== Call 2: same conversation plus the tool result ===")
-    response = client.messages.create(
-        model=MODEL, max_tokens=16000, system=system, tools=tools.TOOL_SCHEMAS, messages=messages
-    )
-    print_blocks(response)
+    log.append({"step": MAX_STEPS, "event": "step_cap_reached"})
+    return {"final_text": None, "ended": "step_cap", "steps": MAX_STEPS, "log": log}
+
+
+def print_run(run: dict) -> None:
+    for entry in run["log"]:
+        if entry["event"] == "tool_call":
+            flag = "  (ERROR)" if entry["is_error"] else ""
+            print(f"Step {entry['step']}: {entry['tool']} {entry['input']}{flag}")
+            print(f"    -> {entry['result'].replace(chr(10), ' | ')}")
+        else:
+            print(f"Step {entry['step']}: {entry['event']} {entry.get('stop_reason', '')}")
+    print(f"\nEnded: {run['ended']} after {run['steps']} steps")
+    print(f"Final answer:\n{run['final_text']}")
 
 
 if __name__ == "__main__":
-    first_call_demo(sys.argv[1] if len(sys.argv) > 1 else "s03")
+    print_run(run_triage(sys.argv[1] if len(sys.argv) > 1 else "s03"))
