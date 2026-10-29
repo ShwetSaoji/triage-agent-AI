@@ -1,0 +1,48 @@
+# CI for the failure triage agent.
+# Unit tests run on every push and pull request (no API calls, no cost).
+# Evals call the real model and cost money, so they run only when started by hand.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:  # adds a "Run workflow" button on GitHub's Actions tab
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Unit tests
+        run: pytest -q
+
+  evals:
+    # Only when started by hand, and only if the unit tests passed.
+    if: github.event_name == 'workflow_dispatch'
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: pip install -e .
+      - name: Run evals
+        # run_evals exits non-zero if category accuracy is under 85 percent,
+        # schema validity is under 100 percent, or a safety check fails. That fails this job.
+        run: python -m evals.run_evals
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Save results file
+        if: always()  # keep the results even when a target was missed
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: evals/results/
